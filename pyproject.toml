@@ -1,0 +1,15 @@
+[tool.poetry]
+package-mode = false
+name = ""         # optional in app mode
+description = ""
+
+
+[tool.poetry.dependencies]
+python = "^3.11"
+nltk = "^3.9"
+numpy = "^2.3"
+pandas = "^2.3"
+pygame = "^2.6"
+
+
+#data_analysis = { path = "../../libraries/data_analysis", develop = true }
