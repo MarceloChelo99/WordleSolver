@@ -15,7 +15,6 @@ class WordsObj:
         self.words_df = DataFrame([list(word) + [word] for word in word_list])
         self.words_df = self.words_df.rename(columns={self.words_df.columns.to_list()[-1]: 'Name'})
 
-        print('hi')
     @property
     def words(self):
         return self.words_df['Name'].to_list()
@@ -29,46 +28,44 @@ class WordsObj:
 
 
 class Entropy:
-    def __init__(self, words: WordsObj):
-        self.wordsObj = words
-        self.n = len(self.wordsObj.words)
+    @staticmethod
+    def system_entropy(words_obj):
+        p = 1 / len(words_obj.words)
+        return p * log2(1 / p) * len(words_obj.words)
 
-    def system_entropy(self):
-        p = 1 / self.n
-        return p * log2(1 / p) * self.n
-
-    def word_entropy(self, word):
+    @staticmethod
+    def word_entropy(word, words_obj):
         total_entropy = 0
         for letter in word:
-            sub_n = len(self.wordsObj.filter_list_by_letter(letter))
-            probability = sub_n / self.n
+            sub_n = len(words_obj.filter_list_by_letter(letter))
+            probability = sub_n / len(words_obj.words)
             i = log2(1 / probability)
             total_entropy += probability * i
         return total_entropy
 
+    @staticmethod
+    def calculate_all_entropies(words_obj):
+        entropies = []
+        for word in words_obj.words:
+            entropies.append((word, Entropy.word_entropy(word, words_obj)))
+        return sorted(entropies, key=lambda x: x[1], reverse=True)
 
 
 class Actions:
-    def __init__(self, words_list):
-        self.wordsObj = WordsObj(words_list)
-        self.entropy = Entropy(self.wordsObj)
+    @staticmethod
+    def refresh_answer(words_obj):
+        return words_obj.return_random_item()
 
-    def refresh_answer(self):
-        return self.wordsObj.return_random_item()
-
-    def make_guess(self, random=False):
+    @staticmethod
+    def make_guess(words_obj, random=False):
         if random:
-            return self.wordsObj.return_random_item()
-        while len((guess := input("Guess: ").strip().lower())) != 5:
+            return words_obj.return_random_item()
+        while len((guess := input("Guess: ").strip().lower())) != len(words_obj.words[0]):
             print("Sorry, try again.")
         return guess
 
-
-    def generate_possible_patterns(self, ):
-        pass
-
     @staticmethod
-    def evaluate_guess(guess, answer):
+    def evaluate_guess(guess, answer) -> dict:
         guess_array = list(guess)
         actual_array = list(answer)
         result = {position: (letter, 0) for position, letter in enumerate(guess_array)}
@@ -81,27 +78,15 @@ class Actions:
                 result[position] = (guess, current_value + 1)
         return result
 
-    def calculate_all_entropies(self):
-        entropies = []
-        for word in self.wordsObj.words:
-            entropies.append((word, self.entropy.word_entropy(word)))
-        return sorted(entropies, key=lambda x: x[1], reverse=True)
-
-    def get_system_entropy(self):
-        return self.entropy.system_entropy()
-
-    def get_word_entropy(self, word):
-        return self.entropy.word_entropy(word)
-
-    def refresh_words_list(self, positions):
+    @staticmethod
+    def refresh_words_list(positions, words_obj):
         for idx, letters in positions.items():
-            self.wordsObj.words_df = self.wordsObj.words_df[self.wordsObj.words_df[idx].isin(letters)]
-        return Actions(self.wordsObj.words)
+            words_obj.words_df = words_obj.words_df[words_obj.words_df[idx].isin(letters)]
 
-    def filter_possible_patterns(self, positions):
+    @staticmethod
+    def filter_possible_patterns(positions, words_obj):
         for idx, letters in positions.items():
-            positions[idx] = [letter for letter in letters if letter in list(self.wordsObj.words_df[idx].unique())]
-        return positions
+            positions[idx] = [letter for letter in letters if letter in list(words_obj.words_df[idx].unique())]
 
     @staticmethod
     def update_positions(guess_scores, positions):
@@ -119,95 +104,102 @@ class Actions:
             if score == 2:
                 positions[idx] = [letter]
 
-        return positions
+
 
 class Round:
-    def __init__(self, actions, answer, positions):
-        self.actions = actions
-        self.answer = answer
-        self.positions = positions
+    def __init__(self, state, action_engine, entropy_engine):
+        self.state = state
+        self.actionGenerator = action_engine
+        self.entropyGenerator = entropy_engine
 
     def make_guess(self, random=False):
-        return self.actions.make_guess(random)
+        return self.actionGenerator.make_guess(self.state.wordsObj)
 
     def get_entropy(self, guess):
-        return self.actions.get_word_entropy(guess)
+        return self.entropyGenerator.word_entropy(guess, self.state.wordsObj)
 
     def evaluate(self, guess):
-        return self.actions.evaluate_guess(guess, self.answer)
+        return self.actionGenerator.evaluate_guess(guess, self.state.answer)
 
-    def update_possibilities(self, scores):
-        self.positions = self.actions.update_positions(scores, self.positions)
-        self.actions = self.actions.refresh_words_list(self.positions)
-        self.positions = self.actions.filter_possible_patterns(self.positions)
+    def update_possibilities(self):
+        self.actionGenerator.update_positions(self.state.scores, self.state.positions)
+        self.actionGenerator.filter_possible_patterns(self.state.positions, self.state.wordsObj)
 
     def run(self):
-        guess = self.make_guess()
-        #guess_entropy = self.get_entropy(guess)
-        evaluation = self.evaluate(guess)
-        self.update_possibilities(evaluation)
-        return self.actions, self.positions, evaluation
+        while (guess := self.make_guess()) not in self.state.originalWordsObj.words:
+            continue
+        self.evaluate(guess)
+        self.update_possibilities()
+        return self.state
+
+
+class State:
+    def __init__(self, words_list, round_number=0, won=False, answer=None, positions=None, scores=None):
+        alphabet = string.ascii_lowercase
+        self.round_number = round_number
+        self.won = won
+        self.scores = scores
+
+        self.originalWordsObj = WordsObj(words_list)
+        self.wordsObj = WordsObj(words_list)
+
+        self.answer = answer if answer is not None else self.originalWordsObj.return_random_item()
+
+        self.positions = positions if positions is not None else {position: list(alphabet)
+                                                                  for position in list(range(len(self.wordsObj.words[0])))}
+
 
 
 class Game:
     def __init__(self, word_length):
-        alphabet = string.ascii_lowercase
-        self.round_number = 0
-        self.won = False
-        self.word_length = word_length
-        self.positions = {position: list(alphabet) for position in list(range(self.word_length))}
-
-        self.words_list = self.word_corpus()
-        self.actions = Actions(self.words_list)
-        self.answer = self.actions.refresh_answer()
-        self.round = Round(self.actions, self.answer, self.positions)
-        self.grid = PygameGrid()
-        self.grid.draw()
+        self.state  = State(self.word_corpus(word_length))
+        self.round = Round(self.state, Actions)
 
 
-
-    def word_corpus(self):
-        return [word for word in corpus.words() if (len(word) == self.word_length) and (word[0].islower())]
+    @staticmethod
+    def word_corpus(word_length):
+        return [word for word in corpus.words() if (len(word) == word_length) and (word[0].islower())]
 
     def new_round(self):
-        self.round_number += 1
-        print(self.answer)
-        self.actions, self.positions, score = self.round.run()
-        colors = []
-        word = ""
-        row_number = self.round_number - 1
-        for idx, (letter, score) in score.items():
-            colors.append(score)
-            word += letter
-
-        self.grid.set_row(row_number, word, colors)
-        self.grid.draw()
+        self.state.round_number += 1
+        print(self.state.answer)
+        self.state = self.round.run()
+        return self.state
 
 
-    def check_win(self):
-        return self.won
-
-    def new_game(self):
-        pass
-
-    def refresh_answer(self):
-        self.answer = self.actions.refresh_answer()
-        return self
-
-
+    @staticmethod
+    def new_game(word_length):
+        return Game(word_length=word_length)
 
 
 def word_corpus(word_length):
     return [word for word in corpus.words() if (len(word)==word_length) and (word[0].islower())]
 
 
+def game(word_length):
+    game = Game(word_length=5)
+    for _ in range(6):
+        game.new_round()
+        state = game.new_round()
+        yield state
+
 def main():
     print("Welcome to Wordle Solver")
     words_list  = word_corpus(5)
-    game = Game(word_length=5)
-    for round_number in range(6):
-        print(round_number)
-        game.new_round()
+
+    grid = PygameGrid()
+    grid.draw()
+
+    for state in game(5):
+        colors = []
+        word = ""
+        row_number = state.round_number - 1
+        for idx, (letter, score) in state.score.items():
+            colors.append(score)
+            word += letter
+
+        grid.set_row(row_number, word, colors)
+        grid.draw()
 
     print("Game over")
 
