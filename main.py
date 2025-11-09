@@ -1,7 +1,7 @@
-from numpy import log2, bincount, array, int16
+from numpy import log2, bincount, array, int16, ones
 from pandas import DataFrame
 from random import choice
-import string
+
 import threading
 import queue
 from itertools import product
@@ -9,12 +9,24 @@ from collections import Counter
 import time
 
 import pygame
+import multiprocessing as mp
 
 import nltk
 nltk.download('words')
 from nltk.corpus import words as corpus
 from wordfreq import word_frequency
 from UI import PygameGrid
+
+_entropy_pool_answers = None
+
+
+def _entropy_pool_initializer(answers):
+    global _entropy_pool_answers
+    _entropy_pool_answers = answers
+
+
+def _entropy_pool_worker(guess):
+    return Entropy.entropy_for_guess(guess, _entropy_pool_answers)
 
 
 
@@ -96,6 +108,27 @@ class Entropy:
         return float((probs * log2(1.0 / probs)).sum())
 
     @staticmethod
+    def compute_entropies_parallel(guesses, answers, processes=None):
+        if not guesses:
+            return []
+
+        max_workers = processes or (mp.cpu_count() or 1)
+        max_workers = min(max_workers, len(guesses))
+
+        if max_workers <= 1:
+            return Entropy.compute_entropies_bulk(guesses, answers)
+
+        ctx = mp.get_context("spawn")
+
+        with ctx.Pool(
+                processes=max_workers,
+                initializer=_entropy_pool_initializer,
+                initargs=(answers,),
+        ) as pool:
+            chunk = max(1, len(guesses) // (max_workers * 4))
+            return pool.map(_entropy_pool_worker, guesses, chunksize=chunk)
+
+    @staticmethod
     def compute_entropies_bulk(guesses, answers):
         # pure Python loop; much faster than df['Name'].map(...)
         ent = [Entropy.entropy_for_guess(g, answers) for g in guesses]
@@ -121,45 +154,70 @@ class Actions:
     def refresh_answer(words_obj):
         return words_obj.return_random_item()
 
-    @staticmethod
-    def evaluate_guess(guess, answer) -> dict:
-        guess_array = list(guess)
-        actual_array = list(answer)
-        result = {position: (letter, 0) for position, letter in enumerate(guess_array)}
-        for position, (guess, actual) in enumerate(zip(guess_array, actual_array)):
-            if guess in actual_array:
-                current_value = result[position][1]
-                result[position] = (guess, current_value + 1)
-            if guess == actual:
-                current_value = result[position][1]
-                result[position] = (guess, current_value + 1)
-        return result
 
     @staticmethod
-    def refresh_words_list(positions, words_obj):
-        for idx, letters in positions.items():
-            words_obj.words_df = words_obj.words_df[words_obj.words_df[idx].isin(letters)]
+    def update_candidates(guess_scores, words_obj):
+        df = words_obj.words_df
+        if df.empty:
+            return
 
-    @staticmethod
-    def filter_possible_patterns(positions, words_obj):
-        for idx, letters in positions.items():
-            positions[idx] = [letter for letter in letters if letter in list(words_obj.words_df[idx].unique())]
+        letter_columns = [col for col in df.columns if isinstance(col, int)]
+        if not letter_columns:
+            return
 
-    @staticmethod
-    def update_positions(guess_scores, positions):
+        letter_columns.sort()
+        letters_matrix = df[letter_columns].to_numpy(copy=False)
+        mask = ones(len(df), dtype=bool)
+
+        column_positions = {col: pos for pos, col in enumerate(letter_columns)}
+        unique_letters = {letter for letter, _ in guess_scores.values()}
+        letter_matches = {
+            letter: letters_matrix == letter for letter in unique_letters
+        }
+
+        letter_feedback = {}
+
         for idx, (letter, score) in guess_scores.items():
-            print(idx, letter, score)
-            if score == 0:
-                for position in positions:
-                    current_values = positions[position]
-                    positions[position] = [item for item in current_values if item != letter]
+            info = letter_feedback.setdefault(letter, {"positives": 0, "zeros": 0})
+            col_pos = column_positions.get(idx)
+            if col_pos is None:
+                continue
 
-            if score == 1:
-                current_values = positions[idx]
-                positions[idx] = [item for item in current_values if item != letter]
-
+            matches = letter_matches[letter][:, col_pos]
             if score == 2:
-                positions[idx] = [letter]
+                mask &= matches
+                info["positives"] += 1
+            elif score == 1:
+                mask &= ~matches
+                info["positives"] += 1
+            else:
+                mask &= ~matches
+                info["zeros"] += 1
+
+            if not mask.any():
+                words_obj.words_df = df.iloc[0:0].copy()
+                return
+
+        for letter, info in letter_feedback.items():
+            positives = info["positives"]
+            zero_count = info["zeros"]
+            occurrences = letter_matches[letter].sum(axis=1)
+
+            if positives == 0:
+                condition = occurrences == 0
+            elif zero_count:
+                condition = occurrences == positives
+            else:
+                condition = occurrences >= positives
+
+            mask &= condition
+
+            if not mask.any():
+                words_obj.words_df = df.iloc[0:0].copy()
+                return
+
+        words_obj.words_df = df.loc[mask].copy()
+
 
 
 
@@ -183,7 +241,7 @@ class Round:
             return self.state
 
         self.state.invalid_guess = False
-        self.entropyGenerator.entropy(normalized_guess, self.state.wordsObj)
+        #self.entropyGenerator.entropy(normalized_guess, self.state.wordsObj.words)
         self.state.scores = self.evaluate(normalized_guess)
         self.state.round_number += 1
         self.update_possibilities()
@@ -197,16 +255,18 @@ class Round:
         return self.entropyGenerator.word_entropy(guess, self.state.wordsObj)
 
     def evaluate(self, guess):
-        return self.actionGenerator.evaluate_guess(guess, self.state.answer)
+        pattern = Entropy.feedback_pattern(guess, self.state.answer)
+        return {
+            position: (letter, score)
+            for position, (letter, score) in enumerate(zip(guess, pattern))
+        }
 
     def update_possibilities(self):
-        self.actionGenerator.update_positions(self.state.scores, self.state.positions)
-        self.actionGenerator.filter_possible_patterns(self.state.positions, self.state.wordsObj)
+        self.actionGenerator.update_candidates(self.state.scores, self.state.wordsObj)
 
 
 class State:
-    def __init__(self, words_list, round_number=0, won=False, answer=None, positions=None, scores=None):
-        alphabet = string.ascii_lowercase
+    def __init__(self, words_list, round_number=0, won=False, answer=None, scores=None):
         self.round_number = round_number
         self.won = won
         self.scores = scores
@@ -217,8 +277,6 @@ class State:
 
         self.answer = answer if answer is not None else self.originalWordsObj.return_random_item()
 
-        self.positions = positions if positions is not None else {position: list(alphabet)
-                                                                  for position in list(range(len(self.wordsObj.words[0])))}
 
 
 
@@ -233,12 +291,11 @@ class Game:
         return [word for word in corpus.words() if (len(word) == word_length) and (word[0].islower())]
 
     def calculate_entropies(self):
-        df = self.state.wordsObj.words_df.iloc[:4000]
-
+        df = self.state.wordsObj.words_df.iloc[:2000]
         start = time.perf_counter()
         answers = df['Name'].to_list()
         guesses = df['Name'].to_list() # or a shortlist
-        ent = Entropy.compute_entropies_bulk(guesses, answers)
+        ent = Entropy.compute_entropies_parallel(guesses, answers)
         df.loc[df['Name'].isin(guesses), 'Expected_Entropy'] = ent
         #df['Expected_Entropy'] = df['Name'].map(lambda x: Entropy.entropy(x, words_list))
         df = df.sort_values(by='Expected_Entropy', ascending=False)
