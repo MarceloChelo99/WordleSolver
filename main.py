@@ -182,7 +182,6 @@ def word_corpus(word_length):
 def game(word_length):
     game_session = Game(word_length=word_length)
     for _ in range(6):
-        game_session.new_round()
         state = game_session.new_round()
         yield state
 
