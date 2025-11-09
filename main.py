@@ -95,28 +95,6 @@ class Entropy:
         return H
 
 
-
-
-    # @staticmethod
-    # def entropy(word, words_obj):
-    #     patterns = list(product((0, 1, 2), repeat=5))
-    #     expected_entropy = 0
-    #     original_length = words_obj.words_df.shape[0]
-    #     for code in patterns:
-    #         df = words_obj.words_df.copy()
-    #         for idx, (letter, value) in enumerate(zip(list(word), code)):
-    #             if value == 2:
-    #                 df = df[df[idx] == letter]
-    #             if value == 1:
-    #                 df = df[df[idx] != letter]
-    #             if value == 0:
-    #                 df = df[~df['Name'].str.contains(letter)]
-    #         new_length = df.shape[0]
-    #         p = new_length / original_length
-    #         i = log2(1 / p)
-    #         expected_entropy += p * i
-    #     return expected_entropy
-
 class Actions:
     @staticmethod
     def refresh_answer(words_obj):
