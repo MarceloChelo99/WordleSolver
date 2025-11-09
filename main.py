@@ -2,12 +2,15 @@ from numpy import log2
 from pandas import DataFrame
 from random import choice
 import string
+import threading
+import queue
 
 import nltk
 nltk.download('words')
 from nltk.corpus import words as corpus
 
 from UI import PygameGrid
+
 
 
 class WordsObj:
@@ -128,7 +131,7 @@ class Round:
     def run(self):
         while (guess := self.make_guess()) not in self.state.originalWordsObj.words:
             continue
-        self.evaluate(guess)
+        self.state.scores = self.evaluate(guess)
         self.update_possibilities()
         return self.state
 
@@ -153,7 +156,7 @@ class State:
 class Game:
     def __init__(self, word_length):
         self.state  = State(self.word_corpus(word_length))
-        self.round = Round(self.state, Actions)
+        self.round = Round(self.state, Actions, Entropy)
 
 
     @staticmethod
@@ -177,29 +180,43 @@ def word_corpus(word_length):
 
 
 def game(word_length):
-    game = Game(word_length=5)
+    game_session = Game(word_length=word_length)
     for _ in range(6):
-        game.new_round()
-        state = game.new_round()
+        game_session.new_round()
+        state = game_session.new_round()
         yield state
+
+def run_game(word_length, state_queue):
+    for state in game(word_length):
+        state_queue.put(state)
+    state_queue.put(None)  # sentinel
 
 def main():
     print("Welcome to Wordle Solver")
-    words_list  = word_corpus(5)
+    state_queue = queue.Queue()
+    thread = threading.Thread(target=run_game, args=(5, state_queue), daemon=True)
+    thread.start()
 
     grid = PygameGrid()
     grid.draw()
 
-    for state in game(5):
-        colors = []
-        word = ""
-        row_number = state.round_number - 1
-        for idx, (letter, score) in state.score.items():
-            colors.append(score)
-            word += letter
-
-        grid.set_row(row_number, word, colors)
-        grid.draw()
+    running = True
+    while running:
+        try:
+            state = state_queue.get_nowait()
+        except queue.Empty:
+            pass
+        else:
+            if state is None:
+                running = False
+            else:
+                # use state.scores (note the plural) when pulling letter/score pairs
+                colors, word = [], ""
+                for idx, (letter, score) in state.scores.items():
+                    colors.append(score)
+                    word += letter
+                grid.set_row(state.round_number - 1, word, colors)
+                grid.draw()
 
     print("Game over")
 
