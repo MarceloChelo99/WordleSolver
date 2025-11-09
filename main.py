@@ -4,13 +4,15 @@ from random import choice
 import string
 import threading
 import queue
+from itertools import product
+from collections import Counter
 
 import pygame
 
 import nltk
 nltk.download('words')
 from nltk.corpus import words as corpus
-
+from wordfreq import word_frequency
 from UI import PygameGrid
 
 
@@ -19,6 +21,8 @@ class WordsObj:
     def __init__(self, word_list):
         self.words_df = DataFrame([list(word) + [word] for word in word_list])
         self.words_df = self.words_df.rename(columns={self.words_df.columns.to_list()[-1]: 'Name'})
+        self.words_df['Frequency'] = self.words_df['Name'].map(lambda x: word_frequency(x, 'en', wordlist='best'))
+        print('')
 
     @property
     def words(self):
@@ -55,6 +59,62 @@ class Entropy:
             entropies.append((word, Entropy.word_entropy(word, words_obj)))
         return sorted(entropies, key=lambda x: x[1], reverse=True)
 
+    @staticmethod
+    def feedback_pattern(guess: str, answer: str) -> tuple[int, ...]:
+        # returns a 5-tuple of 0/1/2
+        res = [0] * len(guess)
+        ans = list(answer)
+
+        # pass 1: greens
+        for i, (g, a) in enumerate(zip(guess, ans)):
+            if g == a:
+                res[i] = 2
+                ans[i] = None  # consume
+
+        # pass 2: yellows with multiplicity control
+        leftover = Counter(ch for ch in ans if ch is not None)
+        for i, g in enumerate(guess):
+            if res[i] == 0 and leftover.get(g, 0) > 0:
+                res[i] = 1
+                leftover[g] -= 1
+        return tuple(res)
+
+    @staticmethod
+    def entropy(word: str, words_obj) -> float:
+        answers = words_obj.words  # current candidate answers
+        N = len(answers)
+        # Count how many answers yield each feedback pattern
+        counts = Counter(Entropy.feedback_pattern(word, a) for a in answers)
+
+        # Expected info: sum p * log2(1/p) over patterns with nonzero mass
+        H = 0.0
+        for c in counts.values():
+            p = c / N
+            H += p * log2(1.0 / p)
+        return H
+
+
+
+
+    # @staticmethod
+    # def entropy(word, words_obj):
+    #     patterns = list(product((0, 1, 2), repeat=5))
+    #     expected_entropy = 0
+    #     original_length = words_obj.words_df.shape[0]
+    #     for code in patterns:
+    #         df = words_obj.words_df.copy()
+    #         for idx, (letter, value) in enumerate(zip(list(word), code)):
+    #             if value == 2:
+    #                 df = df[df[idx] == letter]
+    #             if value == 1:
+    #                 df = df[df[idx] != letter]
+    #             if value == 0:
+    #                 df = df[~df['Name'].str.contains(letter)]
+    #         new_length = df.shape[0]
+    #         p = new_length / original_length
+    #         i = log2(1 / p)
+    #         expected_entropy += p * i
+    #     return expected_entropy
 
 class Actions:
     @staticmethod
@@ -113,6 +173,7 @@ class Round:
         normalized_guess = guess.strip().lower()
 
         word_length = len(self.state.answer)
+        print(self.state.answer)
         if len(normalized_guess) != word_length:
             self.state.invalid_guess = True
             return self.state
@@ -122,6 +183,7 @@ class Round:
             return self.state
 
         self.state.invalid_guess = False
+        self.entropyGenerator.entropy(normalized_guess, self.state.wordsObj)
         self.state.scores = self.evaluate(normalized_guess)
         self.state.round_number += 1
         self.update_possibilities()
@@ -170,6 +232,12 @@ class Game:
     def word_corpus(word_length):
         return [word for word in corpus.words() if (len(word) == word_length) and (word[0].islower())]
 
+    def calculate_entropies(self):
+        df = self.state.wordsObj.words_df
+        df['Expected_Entropy'] = df['Name'].map(lambda x: Entropy.entropy(x, self.state.wordsObj))
+        df = df.sort_values(by='Expected_Entropy', ascending=False)
+        print(df.set_index('Name').head(50))
+
     def new_round(self, guess):
         self.state = self.round.make_guess(guess)
         return self.state
@@ -188,10 +256,10 @@ def run_game(word_length, guess_queue, state_queue):
     game_session = Game(word_length=word_length)
 
     while True:
+        game_session.calculate_entropies()
         guess = guess_queue.get()
         if guess is None:
             break
-
         state = game_session.new_round(guess)
         state_queue.put(state)
 
@@ -295,3 +363,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

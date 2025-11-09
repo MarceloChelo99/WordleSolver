@@ -10,6 +10,7 @@ nltk = "^3.9"
 numpy = "^2.3"
 pandas = "^2.3"
 pygame = "^2.6"
+wordfreq = "^3.1"
 
 
 #data_analysis = { path = "../../libraries/data_analysis", develop = true }
