@@ -6,6 +6,7 @@ import threading
 import queue
 from itertools import product
 from collections import Counter
+import time
 
 import pygame
 
@@ -53,10 +54,10 @@ class Entropy:
         return total_entropy
 
     @staticmethod
-    def calculate_all_entropies(words_obj):
+    def calculate_all_entropies(word_list):
         entropies = []
-        for word in words_obj.words:
-            entropies.append((word, Entropy.word_entropy(word, words_obj)))
+        for word in word_list:
+            entropies.append((word, Entropy.word_entropy(word, word_list)))
         return sorted(entropies, key=lambda x: x[1], reverse=True)
 
     @staticmethod
@@ -80,8 +81,8 @@ class Entropy:
         return tuple(res)
 
     @staticmethod
-    def entropy(word: str, words_obj) -> float:
-        answers = words_obj.words  # current candidate answers
+    def entropy(word: str, word_list) -> float:
+        answers = word_list  # current candidate answers
         N = len(answers)
         # Count how many answers yield each feedback pattern
         counts = Counter(Entropy.feedback_pattern(word, a) for a in answers)
@@ -234,9 +235,14 @@ class Game:
 
     def calculate_entropies(self):
         df = self.state.wordsObj.words_df
-        df['Expected_Entropy'] = df['Name'].map(lambda x: Entropy.entropy(x, self.state.wordsObj))
+        words_list = self.state.wordsObj.words[:1000]
+        start = time.perf_counter()
+        df['Expected_Entropy'] = df['Name'].map(lambda x: Entropy.entropy(x, words_list))
         df = df.sort_values(by='Expected_Entropy', ascending=False)
         print(df.set_index('Name').head(50))
+        elapsed = time.perf_counter() - start
+        print(elapsed, "s")
+
 
     def new_round(self, guess):
         self.state = self.round.make_guess(guess)
