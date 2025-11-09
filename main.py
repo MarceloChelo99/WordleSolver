@@ -1,4 +1,4 @@
-from numpy import log2
+from numpy import log2, bincount, array, int16
 from pandas import DataFrame
 from random import choice
 import string
@@ -61,6 +61,13 @@ class Entropy:
         return sorted(entropies, key=lambda x: x[1], reverse=True)
 
     @staticmethod
+    def encode_pattern(p):
+        v = 0
+        for x in p:
+            v = v * 3 + x
+        return v
+
+    @staticmethod
     def feedback_pattern(guess: str, answer: str) -> tuple[int, ...]:
         # returns a 5-tuple of 0/1/2
         res = [0] * len(guess)
@@ -79,6 +86,20 @@ class Entropy:
                 res[i] = 1
                 leftover[g] -= 1
         return tuple(res)
+
+    @staticmethod
+    def entropy_for_guess(guess, answers):
+        # produce encoded patterns for this guess vs every answer
+        ids = [Entropy.encode_pattern(Entropy.feedback_pattern(guess, a)) for a in answers]
+        counts = bincount(array(ids, dtype=int16), minlength=3 ** 5)
+        probs = counts[counts > 0] / len(answers)
+        return float((probs * log2(1.0 / probs)).sum())
+
+    @staticmethod
+    def compute_entropies_bulk(guesses, answers):
+        # pure Python loop; much faster than df['Name'].map(...)
+        ent = [Entropy.entropy_for_guess(g, answers) for g in guesses]
+        return ent
 
     @staticmethod
     def entropy(word: str, word_list) -> float:
@@ -212,10 +233,14 @@ class Game:
         return [word for word in corpus.words() if (len(word) == word_length) and (word[0].islower())]
 
     def calculate_entropies(self):
-        df = self.state.wordsObj.words_df
-        words_list = self.state.wordsObj.words[:1000]
+        df = self.state.wordsObj.words_df.iloc[:4000]
+
         start = time.perf_counter()
-        df['Expected_Entropy'] = df['Name'].map(lambda x: Entropy.entropy(x, words_list))
+        answers = df['Name'].to_list()
+        guesses = df['Name'].to_list() # or a shortlist
+        ent = Entropy.compute_entropies_bulk(guesses, answers)
+        df.loc[df['Name'].isin(guesses), 'Expected_Entropy'] = ent
+        #df['Expected_Entropy'] = df['Name'].map(lambda x: Entropy.entropy(x, words_list))
         df = df.sort_values(by='Expected_Entropy', ascending=False)
         print(df.set_index('Name').head(50))
         elapsed = time.perf_counter() - start
