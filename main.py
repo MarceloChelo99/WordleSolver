@@ -463,9 +463,18 @@ class State:
 
 
 class Game:
-    def __init__(self, word_length, *, manual_feedback=False):
+    def __init__(self, word_length, *, manual_feedback=False, answer=None):
+        word_list = self.word_corpus(word_length)
+        if answer is not None:
+            normalized_answer = answer.strip().lower()
+            if len(normalized_answer) != word_length:
+                raise ValueError("Provided answer length does not match word length")
+            if normalized_answer not in word_list:
+                word_list = word_list + [normalized_answer]
+            answer = normalized_answer
+
         self.state = State(
-            self.word_corpus(word_length), manual_feedback=manual_feedback
+            word_list, manual_feedback=manual_feedback, answer=answer
         )
         self.round = Round(self.state, Actions, Entropy)
 
@@ -494,16 +503,20 @@ class Game:
 
 
     @staticmethod
-    def new_game(word_length, manual_feedback=False):
-        return Game(word_length=word_length, manual_feedback=manual_feedback)
+    def new_game(word_length, manual_feedback=False, answer=None):
+        return Game(
+            word_length=word_length, manual_feedback=manual_feedback, answer=answer
+        )
 
 
 def word_corpus(word_length):
     return [word for word in corpus.words() if (len(word)==word_length) and (word[0].islower())]
 
 
-def run_game(word_length, guess_queue, state_queue, manual_feedback=False):
-    game_session = Game(word_length=word_length, manual_feedback=manual_feedback)
+def run_game(word_length, guess_queue, state_queue, manual_feedback=False, answer=None):
+    game_session = Game(
+        word_length=word_length, manual_feedback=manual_feedback, answer=answer
+    )
 
     while True:
         game_session.calculate_entropies()
@@ -539,6 +552,11 @@ def parse_args():
         action="store_true",
         help="Manually enter Wordle feedback colors in the UI instead of using a hidden answer.",
     )
+    parser.add_argument(
+        "--wordle-today",
+        action="store_true",
+        help="Use today's official Wordle answer as the hidden word (requires internet).",
+    )
     return parser.parse_args()
 
 
@@ -547,12 +565,37 @@ def main():
     args = parse_args()
     word_length = max(1, args.word_length)
     manual_feedback = args.manual_feedback
+    use_wordle_today = args.wordle_today
+
+    if manual_feedback and use_wordle_today:
+        raise SystemExit(
+            "--manual-feedback cannot be used together with --wordle-today."
+        )
+
+    answer = None
+    if use_wordle_today:
+        try:
+            answer = download_today_wordle_word()
+        except RuntimeError as exc:
+            print(f"Unable to download today's Wordle answer: {exc}")
+            print("Falling back to a random answer from the dictionary.")
+            answer = None
+        else:
+            if len(answer) != word_length:
+                print(
+                    "Downloaded Wordle answer length does not match --word-length. "
+                    "Falling back to a random answer."
+                )
+                answer = None
+            else:
+                print("Using today's official Wordle answer.")
+
     state_queue = queue.Queue()
     guess_queue = queue.Queue()
 
     thread = threading.Thread(
         target=run_game,
-        args=(word_length, guess_queue, state_queue, manual_feedback),
+        args=(word_length, guess_queue, state_queue, manual_feedback, answer),
         daemon=True,
     )
     thread.start()
