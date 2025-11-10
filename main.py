@@ -1,33 +1,131 @@
-from numpy import log2, bincount, array, int16, ones
-from pandas import DataFrame
-from random import choice
-
-import threading
+import argparse
+import json
 import queue
-from itertools import product
-from collections import Counter
+import threading
 import time
+from collections import Counter
+from datetime import date, datetime, timezone
+from random import choice
+from urllib.error import HTTPError, URLError
+from urllib.request import urlopen
 
-import pygame
 import multiprocessing as mp
-
+import numpy as np
 import nltk
-nltk.download('words')
+import pygame
+from numpy import log2, ones
+from pandas import DataFrame
+
+
+def _ensure_words_corpus():
+    """Make sure the NLTK words corpus is available without re-downloading."""
+
+    try:
+        nltk.data.find("corpora/words")
+    except LookupError:
+        nltk.download("words", quiet=True)
+
+
+_ensure_words_corpus()
 from nltk.corpus import words as corpus
 from wordfreq import word_frequency
 from UI import PygameGrid
 
-_entropy_pool_answers = None
+_entropy_pool_answers_matrix = None
 
 
-def _entropy_pool_initializer(answers):
-    global _entropy_pool_answers
-    _entropy_pool_answers = answers
+def _entropy_pool_initializer(answers_matrix):
+    global _entropy_pool_answers_matrix
+    _entropy_pool_answers_matrix = answers_matrix
 
 
 def _entropy_pool_worker(guess):
-    return Entropy.entropy_for_guess(guess, _entropy_pool_answers)
+    return Entropy.entropy_for_guess(guess, _entropy_pool_answers_matrix)
 
+
+_BASE3_WEIGHTS_CACHE = {}
+
+
+def _base3_weights(length):
+    weights = _BASE3_WEIGHTS_CACHE.get(length)
+    if weights is None:
+        weights = np.power(3, np.arange(length - 1, -1, -1), dtype=np.int32)
+        _BASE3_WEIGHTS_CACHE[length] = weights
+    return weights
+
+
+def _words_to_matrix(words):
+    if not words:
+        return np.empty((0, 0), dtype=np.uint8)
+
+    word_length = len(words[0])
+    matrix = np.empty((len(words), word_length), dtype=np.uint8)
+
+    for idx, word in enumerate(words):
+        if len(word) != word_length:
+            raise ValueError("All words must have the same length")
+        matrix[idx] = np.frombuffer(word.encode("ascii"), dtype=np.uint8)
+
+    return matrix
+
+
+def download_wordle_solution(target_date=None, *, timeout=10):
+    """Download the official Wordle solution for the given date.
+
+    Parameters
+    ----------
+    target_date : datetime.date | datetime.datetime | None
+        The calendar date for which to fetch the Wordle solution. Defaults to
+        the current day in UTC if ``None`` is provided.
+    timeout : int | float
+        Maximum number of seconds to wait for the remote response.
+
+    Returns
+    -------
+    str
+        The five-letter Wordle solution published for ``target_date``.
+
+    Raises
+    ------
+    RuntimeError
+        If the solution cannot be downloaded or parsed.
+    """
+
+    if target_date is None:
+        target_date = datetime.now(timezone.utc).date()
+    elif isinstance(target_date, datetime):
+        target_date = target_date.date()
+    elif not isinstance(target_date, date):
+        raise TypeError("target_date must be a date, datetime, or None")
+
+    url = f"https://www.nytimes.com/svc/wordle/v2/{target_date.isoformat()}.json"
+
+    try:
+        with urlopen(url, timeout=timeout) as response:
+            if getattr(response, "status", 200) != 200:
+                raise RuntimeError(
+                    f"Unexpected HTTP status {response.status} while downloading Wordle solution."
+                )
+            payload = response.read()
+    except (HTTPError, URLError, TimeoutError) as exc:
+        raise RuntimeError("Failed to download Wordle solution") from exc
+
+    try:
+        data = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Unable to parse Wordle solution response") from exc
+
+    solution = data.get("solution")
+    if not solution:
+        raise RuntimeError("Wordle response did not include a solution value")
+
+    return solution
+
+
+def download_today_wordle_word(*, timeout=10):
+    """Return today's Wordle solution from the official NYT endpoint."""
+
+    return download_wordle_solution(timeout=timeout)
 
 
 class WordsObj:
@@ -100,11 +198,56 @@ class Entropy:
         return tuple(res)
 
     @staticmethod
-    def entropy_for_guess(guess, answers):
-        # produce encoded patterns for this guess vs every answer
-        ids = [Entropy.encode_pattern(Entropy.feedback_pattern(guess, a)) for a in answers]
-        counts = bincount(array(ids, dtype=int16), minlength=3 ** 5)
-        probs = counts[counts > 0] / len(answers)
+    def entropy_for_guess(guess, answers_matrix):
+        if not isinstance(answers_matrix, np.ndarray):
+            answers_matrix = _words_to_matrix(answers_matrix)
+
+        if answers_matrix.size == 0:
+            return 0.0
+
+        guess_vector = np.frombuffer(guess.encode("ascii"), dtype=np.uint8)
+        word_length = answers_matrix.shape[1]
+
+        if guess_vector.shape[0] != word_length:
+            raise ValueError("Guess length does not match answer length")
+
+        greens = answers_matrix == guess_vector
+        patterns = greens.astype(np.uint8) * 2
+
+        if not greens.all():
+            leftover = np.zeros((answers_matrix.shape[0], 256), dtype=np.int8)
+
+            for pos in range(word_length):
+                mask = ~greens[:, pos]
+                if not mask.any():
+                    continue
+
+                rows = np.nonzero(mask)[0]
+                cols = answers_matrix[rows, pos]
+                np.add.at(leftover, (rows, cols), 1)
+
+            for pos in range(word_length):
+                mask = ~greens[:, pos]
+                if not mask.any():
+                    continue
+
+                rows = np.nonzero(mask)[0]
+                if rows.size == 0:
+                    continue
+
+                letter_code = guess_vector[pos]
+                available_rows = rows[leftover[rows, letter_code] > 0]
+                if available_rows.size == 0:
+                    continue
+
+                patterns[available_rows, pos] = 1
+                leftover[available_rows, letter_code] -= 1
+
+        weights = _base3_weights(word_length)
+        encoded = patterns.dot(weights).astype(np.int32)
+        pattern_space = 3 ** word_length
+        counts = np.bincount(encoded, minlength=pattern_space)
+        probs = counts[counts > 0] / answers_matrix.shape[0]
         return float((probs * log2(1.0 / probs)).sum())
 
     @staticmethod
@@ -112,27 +255,31 @@ class Entropy:
         if not guesses:
             return []
 
+        answers_matrix = _words_to_matrix(answers)
+
         max_workers = processes or (mp.cpu_count() or 1)
         max_workers = min(max_workers, len(guesses))
 
         if max_workers <= 1:
-            return Entropy.compute_entropies_bulk(guesses, answers)
+            return Entropy.compute_entropies_bulk(guesses, answers, answers_matrix)
 
-        ctx = mp.get_context("spawn")
+        try:
+            ctx = mp.get_context("fork")
+        except ValueError:
+            ctx = mp.get_context("spawn")
 
         with ctx.Pool(
                 processes=max_workers,
                 initializer=_entropy_pool_initializer,
-                initargs=(answers,),
+                initargs=(answers_matrix,),
         ) as pool:
             chunk = max(1, len(guesses) // (max_workers * 4))
             return pool.map(_entropy_pool_worker, guesses, chunksize=chunk)
 
     @staticmethod
-    def compute_entropies_bulk(guesses, answers):
-        # pure Python loop; much faster than df['Name'].map(...)
-        ent = [Entropy.entropy_for_guess(g, answers) for g in guesses]
-        return ent
+    def compute_entropies_bulk(guesses, answers, answers_matrix=None):
+        matrix = answers_matrix if answers_matrix is not None else _words_to_matrix(answers)
+        return [Entropy.entropy_for_guess(g, matrix) for g in guesses]
 
     @staticmethod
     def entropy(word: str, word_list) -> float:
@@ -227,11 +374,14 @@ class Round:
         self.actionGenerator = action_engine
         self.entropyGenerator = entropy_engine
 
-    def make_guess(self, guess: str):
+    def make_guess(self, guess: str, feedback=None):
         normalized_guess = guess.strip().lower()
 
-        word_length = len(self.state.answer)
-        print(self.state.answer)
+        word_length = self.state.word_length
+        if word_length <= 0:
+            self.state.invalid_guess = True
+            return self.state
+
         if len(normalized_guess) != word_length:
             self.state.invalid_guess = True
             return self.state
@@ -240,9 +390,24 @@ class Round:
             self.state.invalid_guess = True
             return self.state
 
+        if feedback is None:
+            if self.state.manual_feedback:
+                self.state.invalid_guess = True
+                return self.state
+            pattern = Entropy.feedback_pattern(normalized_guess, self.state.answer)
+        else:
+            try:
+                pattern = tuple(int(value) for value in feedback)
+            except (TypeError, ValueError):
+                self.state.invalid_guess = True
+                return self.state
+
+            if len(pattern) != word_length or any(value not in (0, 1, 2) for value in pattern):
+                self.state.invalid_guess = True
+                return self.state
+
         self.state.invalid_guess = False
-        #self.entropyGenerator.entropy(normalized_guess, self.state.wordsObj.words)
-        self.state.scores = self.evaluate(normalized_guess)
+        self.state.scores = self.evaluate(normalized_guess, pattern)
         self.state.round_number += 1
         self.update_possibilities()
 
@@ -254,8 +419,9 @@ class Round:
     def get_entropy(self, guess):
         return self.entropyGenerator.word_entropy(guess, self.state.wordsObj)
 
-    def evaluate(self, guess):
-        pattern = Entropy.feedback_pattern(guess, self.state.answer)
+    def evaluate(self, guess, pattern=None):
+        if pattern is None:
+            pattern = Entropy.feedback_pattern(guess, self.state.answer)
         return {
             position: (letter, score)
             for position, (letter, score) in enumerate(zip(guess, pattern))
@@ -266,23 +432,41 @@ class Round:
 
 
 class State:
-    def __init__(self, words_list, round_number=0, won=False, answer=None, scores=None):
+    def __init__(
+        self,
+        words_list,
+        round_number=0,
+        won=False,
+        answer=None,
+        scores=None,
+        manual_feedback=False,
+    ):
         self.round_number = round_number
         self.won = won
-        self.scores = scores
+        self.scores = scores or {}
         self.invalid_guess = False
+        self.manual_feedback = manual_feedback
 
         self.originalWordsObj = WordsObj(words_list)
         self.wordsObj = WordsObj(words_list)
 
-        self.answer = answer if answer is not None else self.originalWordsObj.return_random_item()
+        self.word_length = len(words_list[0]) if words_list else 0
+
+        if answer is not None:
+            self.answer = answer
+        elif manual_feedback:
+            self.answer = None
+        else:
+            self.answer = self.originalWordsObj.return_random_item()
 
 
 
 
 class Game:
-    def __init__(self, word_length):
-        self.state  = State(self.word_corpus(word_length))
+    def __init__(self, word_length, *, manual_feedback=False):
+        self.state = State(
+            self.word_corpus(word_length), manual_feedback=manual_feedback
+        )
         self.round = Round(self.state, Actions, Entropy)
 
 
@@ -304,29 +488,36 @@ class Game:
         print(elapsed, "s")
 
 
-    def new_round(self, guess):
-        self.state = self.round.make_guess(guess)
+    def new_round(self, guess, feedback=None):
+        self.state = self.round.make_guess(guess, feedback=feedback)
         return self.state
 
 
     @staticmethod
-    def new_game(word_length):
-        return Game(word_length=word_length)
+    def new_game(word_length, manual_feedback=False):
+        return Game(word_length=word_length, manual_feedback=manual_feedback)
 
 
 def word_corpus(word_length):
     return [word for word in corpus.words() if (len(word)==word_length) and (word[0].islower())]
 
 
-def run_game(word_length, guess_queue, state_queue):
-    game_session = Game(word_length=word_length)
+def run_game(word_length, guess_queue, state_queue, manual_feedback=False):
+    game_session = Game(word_length=word_length, manual_feedback=manual_feedback)
 
     while True:
         game_session.calculate_entropies()
-        guess = guess_queue.get()
-        if guess is None:
+        payload = guess_queue.get()
+        if payload is None:
             break
-        state = game_session.new_round(guess)
+        if isinstance(payload, dict):
+            guess = payload.get("guess", "")
+            feedback = payload.get("feedback")
+        else:
+            guess = payload
+            feedback = None
+
+        state = game_session.new_round(guess, feedback)
         state_queue.put(state)
 
         if not state.invalid_guess and (state.won or state.round_number >= 6):
@@ -334,15 +525,34 @@ def run_game(word_length, guess_queue, state_queue):
 
     state_queue.put(None)  # sentinel
 
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Wordle Solver")
+    parser.add_argument(
+        "--word-length",
+        type=int,
+        default=5,
+        help="Length of the target words (default: 5).",
+    )
+    parser.add_argument(
+        "--manual-feedback",
+        action="store_true",
+        help="Manually enter Wordle feedback colors in the UI instead of using a hidden answer.",
+    )
+    return parser.parse_args()
+
+
 def main():
     print("Welcome to Wordle Solver")
-    word_length = 5
+    args = parse_args()
+    word_length = max(1, args.word_length)
+    manual_feedback = args.manual_feedback
     state_queue = queue.Queue()
     guess_queue = queue.Queue()
 
     thread = threading.Thread(
         target=run_game,
-        args=(word_length, guess_queue, state_queue),
+        args=(word_length, guess_queue, state_queue, manual_feedback),
         daemon=True,
     )
     thread.start()
@@ -352,6 +562,10 @@ def main():
 
     current_guess = ""
     current_row = 0
+    awaiting_result = False
+    editing_feedback = False
+    active_feedback_row = None
+    pending_guess = ""
     preview_dirty = False
     running = True
     clock = pygame.time.Clock()
@@ -362,20 +576,66 @@ def main():
                 running = False
                 guess_queue.put(None)
             elif event.type == pygame.KEYDOWN:
+                if awaiting_result and event.key != pygame.K_ESCAPE:
+                    continue
+
                 if event.key == pygame.K_RETURN:
-                    if current_guess:
-                        guess_queue.put(current_guess)
+                    if manual_feedback and editing_feedback and active_feedback_row is not None:
+                        feedback = grid.get_row_scores(active_feedback_row, word_length)
+                        guess_queue.put({"guess": pending_guess, "feedback": feedback})
+                        awaiting_result = True
+                        editing_feedback = False
+                        active_feedback_row = None
+                        pending_guess = ""
+                    elif len(current_guess) == word_length:
+                        if manual_feedback:
+                            grid.set_row(current_row, current_guess, [0] * word_length)
+                            editing_feedback = True
+                            active_feedback_row = current_row
+                            pending_guess = current_guess
+                            preview_dirty = True
+                        else:
+                            guess_queue.put({"guess": current_guess, "feedback": None})
+                            awaiting_result = True
+                    else:
+                        continue
+                elif event.key == pygame.K_ESCAPE:
+                    if manual_feedback and editing_feedback and active_feedback_row is not None:
+                        grid.set_row(active_feedback_row, "", [])
+                        editing_feedback = False
+                        active_feedback_row = None
+                        pending_guess = ""
+                        current_guess = ""
+                        preview_dirty = True
+                    elif current_guess:
+                        current_guess = ""
+                        preview_dirty = True
                 elif event.key == pygame.K_BACKSPACE:
+                    if manual_feedback and editing_feedback:
+                        continue
                     if current_guess:
                         current_guess = current_guess[:-1]
                         preview_dirty = True
                 else:
+                    if manual_feedback and editing_feedback:
+                        continue
                     if (
                         event.unicode
                         and event.unicode.isalpha()
                         and len(current_guess) < word_length
                     ):
                         current_guess += event.unicode.lower()
+                        preview_dirty = True
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                if (
+                    manual_feedback
+                    and editing_feedback
+                    and event.button == 1
+                    and active_feedback_row is not None
+                ):
+                    cell = grid.cell_from_point(event.pos)
+                    if cell and cell[0] == active_feedback_row:
+                        grid.cycle_cell(*cell)
                         preview_dirty = True
 
         try:
@@ -389,6 +649,10 @@ def main():
                     print("Invalid guess, try again.")
                     current_guess = ""
                     current_row = state.round_number
+                    awaiting_result = False
+                    editing_feedback = False
+                    active_feedback_row = None
+                    pending_guess = ""
                     preview_dirty = True
                     if current_row < grid.ROWS:
                         grid.set_row(current_row, "", [])
@@ -402,6 +666,10 @@ def main():
                 grid.set_row(state.round_number - 1, word, colors)
                 current_row = state.round_number
                 current_guess = ""
+                awaiting_result = False
+                editing_feedback = False
+                active_feedback_row = None
+                pending_guess = ""
                 preview_dirty = True
 
                 if state.won or state.round_number >= grid.ROWS:
@@ -412,7 +680,11 @@ def main():
             pass
 
         if preview_dirty:
-            if running and current_row < grid.ROWS:
+            if (
+                running
+                and current_row < grid.ROWS
+                and not (manual_feedback and editing_feedback)
+            ):
                 preview_colors = [0] * len(current_guess)
                 grid.set_row(current_row, current_guess, preview_colors)
             grid.draw()

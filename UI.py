@@ -1,5 +1,15 @@
+from typing import Optional
+
 import pygame
 from pygame.locals import QUIT
+
+
+def _cycle_score(value):
+    """Return the next Wordle score in the 0→1→2→0 cycle."""
+
+    if value is None:
+        return 0
+    return (int(value) + 1) % 3
 
 class PygameGrid:
     """
@@ -48,6 +58,7 @@ class PygameGrid:
         # grid state
         self.letters = [["" for _ in range(self.COLS)] for _ in range(self.ROWS)]
         self.colors = [[self.CELL_BG for _ in range(self.COLS)] for _ in range(self.ROWS)]
+        self.score_states = [[None for _ in range(self.COLS)] for _ in range(self.ROWS)]
         self._running = True
 
     def _cell_rect(self, r: int, c: int) -> pygame.Rect:
@@ -55,7 +66,7 @@ class PygameGrid:
         y = self.TOP + r * (self.CELL_SIZE + self.GAP)
         return pygame.Rect(x, y, self.CELL_SIZE, self.CELL_SIZE)
 
-    def set_row(self, row: int, word: str, scores):
+    def set_row(self, row: int, word: str, scores=None):
         """
         Set letters and colors for `row`.
         - row: 0-based row index (0 <= row < 6)
@@ -64,15 +75,20 @@ class PygameGrid:
         """
         if not (0 <= row < self.ROWS):
             raise IndexError("row out of range")
+        scores = list(scores or [])
         # fill letters and colors for this row
         for c in range(self.COLS):
             if c < len(word):
                 ch = word[c]
                 self.letters[row][c] = ch
-                score = int(scores[c]) if c < len(scores) else None
+                score = None
+                if c < len(scores) and scores[c] is not None:
+                    score = int(scores[c])
+                self.score_states[row][c] = score
                 self.colors[row][c] = self.SCORE_COLORS.get(score, self.CELL_BG)
             else:
                 self.letters[row][c] = ""
+                self.score_states[row][c] = None
                 self.colors[row][c] = self.CELL_BG
 
     def draw(self):
@@ -96,6 +112,33 @@ class PygameGrid:
             if ev.type == QUIT:
                 self._running = False
         return self._running
+
+    def cell_from_point(self, pos):
+        """Return (row, col) for a point in window coordinates or None if outside grid."""
+
+        x, y = pos
+        for r in range(self.ROWS):
+            for c in range(self.COLS):
+                if self._cell_rect(r, c).collidepoint(x, y):
+                    return r, c
+        return None
+
+    def cycle_cell(self, row: int, col: int):
+        """Advance the score state for the given cell and update its color."""
+
+        score = _cycle_score(self.score_states[row][col])
+        self.score_states[row][col] = score
+        self.colors[row][col] = self.SCORE_COLORS.get(score, self.CELL_BG)
+
+    def get_row_scores(self, row: int, length: Optional[int] = None):
+        """Return the numeric scores (0/1/2) for the specified row."""
+
+        if length is None:
+            length = sum(1 for ch in self.letters[row] if ch)
+        return [
+            int(self.score_states[row][c]) if self.score_states[row][c] is not None else 0
+            for c in range(min(length, self.COLS))
+        ]
 
     def close(self):
         """Close window and quit pygame."""
