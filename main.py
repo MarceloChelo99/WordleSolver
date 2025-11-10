@@ -92,7 +92,7 @@ def download_wordle_solution(target_date=None, *, timeout=10):
     """
 
     if target_date is None:
-        target_date = datetime.now(timezone.utc).date()
+        target_date = datetime.now().date()
     elif isinstance(target_date, datetime):
         target_date = target_date.date()
     elif not isinstance(target_date, date):
@@ -484,13 +484,15 @@ class Game:
         return [word for word in corpus.words() if (len(word) == word_length) and (word[0].islower())]
 
     def calculate_entropies(self):
-        df = self.state.wordsObj.words_df.iloc[:2000]
+        df = self.state.wordsObj.words_df
+        # df = df[df['Frequency'] > 0]
         start = time.perf_counter()
         answers = df['Name'].to_list()
         guesses = df['Name'].to_list() # or a shortlist
         ent = Entropy.compute_entropies_parallel(guesses, answers)
         df.loc[df['Name'].isin(guesses), 'Expected_Entropy'] = ent
         #df['Expected_Entropy'] = df['Name'].map(lambda x: Entropy.entropy(x, words_list))
+        df['TotalInfoGain'] = df['Frequency'] * df['Expected_Entropy']
         df = df.sort_values(by='Expected_Entropy', ascending=False)
         print(df.set_index('Name').head(50))
         elapsed = time.perf_counter() - start
